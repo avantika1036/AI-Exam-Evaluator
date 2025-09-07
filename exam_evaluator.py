@@ -103,10 +103,16 @@ Instructions:
    - 0 = completely wrong
    - 5 = perfect
 5. Provide a short feedback explaining the score.
+6. List all key concepts or terms in the student's answer that match the reference material.
 
 Respond ONLY in valid JSON format like:
-{{ "score": X, "feedback": "..." }}
+{{ 
+    "score": X, 
+    "feedback": "...",
+    "concepts": ["concept1", "concept2"]
+}}
 """
+
 
     try:
         response = client.complete(
