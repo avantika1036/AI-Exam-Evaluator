@@ -2,12 +2,12 @@ import os
 import re
 from docx import Document
 import pdfplumber
-from pdf2image import convert_from_path
-import pytesseract
+import google.genai as genai
 from PIL import Image
+import json
 
-# If Tesseract not auto-detected, set path manually:
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# Initialize the Gemini client
+client = genai.Client()
 
 def parse_docx(file_path):
     """Return a list of non-empty lines from a .docx file (split paragraphs into lines)."""
@@ -33,64 +33,73 @@ def parse_pdf_text(file_path):
                         text_list.append(line)
     return text_list
 
-def parse_pdf_image(file_path):
-    """OCR fallback for scanned PDFs: convert pages to images then OCR each page."""
-    text_list = []
-    images = convert_from_path(file_path)
-    for img in images:
-        text = pytesseract.image_to_string(img)
-        for line in text.splitlines():
-            line = line.strip()
-            if line:
-                text_list.append(line)
-    return text_list
+def parse_pdf_or_image_with_gemini(file_path):
+    """
+    Parse a PDF or image file (including handwritten) using the Gemini API.
+    This function sends the image data and a prompt to the model to extract
+    Q&A pairs and returns them as a list of tuples to match the expected format.
+    """
+    with open(file_path, 'rb') as f:
+        file_bytes = f.read()
 
-def parse_image(file_path):
-    """OCR single image files (.jpg, .png, etc.)."""
-    img = Image.open(file_path)
-    text = pytesseract.image_to_string(img)
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-def parse_exam_document(file_path):
-    """Auto-detect file type and return a list of cleaned lines."""
     ext = os.path.splitext(file_path)[-1].lower()
-    if ext == ".docx":
-        return parse_docx(file_path)
-    elif ext == ".pdf":
-        lines = parse_pdf_text(file_path)
-        if lines:
-            return lines
-        return parse_pdf_image(file_path)
-    elif ext in [".jpg", ".jpeg", ".png", ".tiff"]:
-        return parse_image(file_path)
+    if ext in ['.jpg', '.jpeg']:
+        mime_type = 'image/jpeg'
+    elif ext == '.png':
+        mime_type = 'image/png'
+    elif ext == '.pdf':
+        mime_type = 'application/pdf'
     else:
-        raise ValueError("❌ Unsupported file format. Use .docx, .pdf, .jpg, .jpeg, .png, or .tiff")
+        raise ValueError("Unsupported file format for Gemini parsing.")
 
-# --- Robust QA extractor ---------------------------------------------------
-# Recognizes many prefixes: Q, Q1., Question 1), Q:, A:, Ans:, Answer:, Solution, etc.
+    file_part = genai.types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
 
-QUESTION_PREFIX = re.compile(
-    r'^\s*(?:q|question|que|ques)\s*(?:\d+)?\s*(?:[:\.\)\-])\s*', re.IGNORECASE
-)
-ANSWER_PREFIX = re.compile(
-    r'^\s*(?:a|ans|answer|solution|sol)\s*(?:\d+)?\s*(?:[:\.\)\-])\s*', re.IGNORECASE
-)
-
-# Also detect inline "A:" or "Answer:" inside a single line
-INLINE_ANSWER_MARKER = re.compile(r'\b(?:a|ans|answer|solution|sol)\s*(?:\d+)?\s*[:\.\)]', re.IGNORECASE)
-INLINE_QUESTION_MARKER = re.compile(r'\b(?:q|question|que|ques)\s*(?:\d+)?\s*[:\.\)]', re.IGNORECASE)
+    prompt = """
+    Analyze the uploaded document, which may be a handwritten exam page. 
+    Identify and extract all distinct question-answer pairs. 
+    A question is typically followed by an answer. 
+    Format the output as a JSON list of objects, where each object has a 'question' key and an 'answer' key.
+    Example:
+    [
+      { "question": "What is the capital of France?", "answer": "Paris" },
+      { "question": "What is 2+2?", "answer": "4" }
+    ]
+    If no question-answer pairs are found, return an empty JSON list.
+    """
+    
+    response = client.models.generate_content(model='gemini-1.5-flash', contents=[prompt, file_part])
+    
+    try:
+        json_string = response.text.strip().removeprefix('```json\n').removesuffix('\n```')
+        qa_pairs_dicts = json.loads(json_string)
+        
+        # Convert the list of dictionaries into a list of tuples to match the format
+        qa_pairs_tuples = [(item['question'], item['answer']) for item in qa_pairs_dicts]
+        
+        return qa_pairs_tuples
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from Gemini response: {e}")
+        print("The response was:")
+        print(response.text)
+        return []
 
 def extract_qa_pairs(lines):
     """
-    Robust extractor that:
-      - Handles Q:/A: on same line or same paragraph split into lines
-      - Accumulates multi-line questions/answers
-      - Falls back to heuristics if explicit markers absent
+    Robust extractor that handles various text-based question and answer formats.
     Returns: list of (question_text, answer_text)
     """
     qa_pairs = []
     i = 0
     n = len(lines)
+
+    QUESTION_PREFIX = re.compile(
+        r'^\s*(?:q|question|que|ques)\s*(?:\d+)?\s*(?:[:\.\)\-])\s*', re.IGNORECASE
+    )
+    ANSWER_PREFIX = re.compile(
+        r'^\s*(?:a|ans|answer|solution|sol)\s*(?:\d+)?\s*(?:[:\.\)\-])\s*', re.IGNORECASE
+    )
+    INLINE_ANSWER_MARKER = re.compile(r'\b(?:a|ans|answer|solution|sol)\s*(?:\d+)?\s*[:\.\)]', re.IGNORECASE)
+    INLINE_QUESTION_MARKER = re.compile(r'\b(?:q|question|que|ques)\s*(?:\d+)?\s*[:\.\)]', re.IGNORECASE)
 
     while i < n:
         line = lines[i].strip()
@@ -98,151 +107,71 @@ def extract_qa_pairs(lines):
             i += 1
             continue
 
-        # CASE 1: Single line contains both question and answer markers (e.g., "Q: ... A: ...")
-        # Find the earliest answer marker in the line (if any)
-        ans_match_inline = INLINE_ANSWER_MARKER.search(line)
-        q_match_inline = INLINE_QUESTION_MARKER.search(line)
-
-        if q_match_inline:
-            # If both appear inline, split
-            if ans_match_inline and ans_match_inline.start() > q_match_inline.start():
-                # split into question / answer parts
-                q_part = line[:ans_match_inline.start()].strip()
-                a_part = line[ans_match_inline.start():].strip()
-                # remove prefixes
-                q_text = QUESTION_PREFIX.sub('', q_part).strip()
-                a_text = ANSWER_PREFIX.sub('', a_part).strip()
-                qa_pairs.append((q_text, a_text))
-                i += 1
-                continue
-
-            # If there's a question marker inline but no inline answer marker,
-            # treat this as a question line and attempt to gather following lines as the answer.
-            if QUESTION_PREFIX.match(line) or q_match_inline:
-                q_text = QUESTION_PREFIX.sub('', line).strip()
-                # accumulate continued question lines until we hit an explicit answer or next question
-                j = i + 1
-                while j < n and not ANSWER_PREFIX.match(lines[j]) and not QUESTION_PREFIX.match(lines[j]) and not INLINE_ANSWER_MARKER.search(lines[j]):
-                    # stop accumulation if the next line looks like a new question (rare)
-                    # but allow normal continuation lines
-                    q_text += " " + lines[j].strip()
-                    j += 1
-
-                # now attempt to find answer starting at j
-                a_text = ""
-                if j < n and (ANSWER_PREFIX.match(lines[j]) or INLINE_ANSWER_MARKER.search(lines[j])):
-                    # line j starts answer or contains inline answer
-                    # if inline marker exists, split
-                    if INLINE_ANSWER_MARKER.search(lines[j]):
-                        # split the j line at answer marker
-                        m = INLINE_ANSWER_MARKER.search(lines[j])
-                        a_part = lines[j][m.start():].strip()
-                        a_text = ANSWER_PREFIX.sub('', a_part).strip()
-                        k = j + 1
-                        while k < n and not QUESTION_PREFIX.match(lines[k]) and not ANSWER_PREFIX.match(lines[k]) and not INLINE_ANSWER_MARKER.search(lines[k]):
-                            a_text += " " + lines[k].strip()
-                            k += 1
-                        i = k
-                    else:
-                        # normal answer-starting line
-                        a_text = ANSWER_PREFIX.sub('', lines[j]).strip()
-                        k = j + 1
-                        while k < n and not QUESTION_PREFIX.match(lines[k]) and not ANSWER_PREFIX.match(lines[k]) and not INLINE_ANSWER_MARKER.search(lines[k]):
-                            a_text += " " + lines[k].strip()
-                            k += 1
-                        i = k
-                    qa_pairs.append((q_text.strip(), a_text.strip()))
-                    continue
-                else:
-                    # no explicit answer found - skip/question only
-                    i = j
-                    continue
-
-        # CASE 2: Line starts with Question prefix (Q1., Q: etc)
         if QUESTION_PREFIX.match(line):
             q_text = QUESTION_PREFIX.sub('', line).strip()
-            # gather following lines until an answer line is found
             j = i + 1
-            while j < n and not ANSWER_PREFIX.match(lines[j]) and not QUESTION_PREFIX.match(lines[j]) and not INLINE_ANSWER_MARKER.search(lines[j]):
+            while j < n and not ANSWER_PREFIX.match(lines[j]) and not QUESTION_PREFIX.match(lines[j]):
                 q_text += " " + lines[j].strip()
                 j += 1
-
-            # now gather answer if present
+            
             a_text = ""
-            if j < n and (ANSWER_PREFIX.match(lines[j]) or INLINE_ANSWER_MARKER.search(lines[j])):
-                if INLINE_ANSWER_MARKER.search(lines[j]):
-                    m = INLINE_ANSWER_MARKER.search(lines[j])
-                    a_part = lines[j][m.start():].strip()
-                    a_text = ANSWER_PREFIX.sub('', a_part).strip()
-                    k = j + 1
-                    while k < n and not QUESTION_PREFIX.match(lines[k]) and not ANSWER_PREFIX.match(lines[k]) and not INLINE_ANSWER_MARKER.search(lines[k]):
-                        a_text += " " + lines[k].strip()
-                        k += 1
-                    i = k
-                else:
-                    a_text = ANSWER_PREFIX.sub('', lines[j]).strip()
-                    k = j + 1
-                    while k < n and not QUESTION_PREFIX.match(lines[k]) and not ANSWER_PREFIX.match(lines[k]) and not INLINE_ANSWER_MARKER.search(lines[k]):
-                        a_text += " " + lines[k].strip()
-                        k += 1
-                    i = k
-                qa_pairs.append((q_text.strip(), a_text.strip()))
-                continue
+            if j < n and ANSWER_PREFIX.match(lines[j]):
+                a_text = ANSWER_PREFIX.sub('', lines[j]).strip()
+                k = j + 1
+                while k < n and not QUESTION_PREFIX.match(lines[k]) and not ANSWER_PREFIX.match(lines[k]):
+                    a_text += " " + lines[k].strip()
+                    k += 1
+                i = k
             else:
-                # question without answer; advance and continue
                 i = j
                 continue
-
-        # CASE 3: Line starts with Answer prefix (or orphan answer)
-        if ANSWER_PREFIX.match(line):
-            # if we find an answer with no preceding question, attempt to use the previous non-empty line as question
-            a_text = ANSWER_PREFIX.sub('', line).strip()
-            k = i + 1
-            while k < n and not QUESTION_PREFIX.match(lines[k]) and not ANSWER_PREFIX.match(lines[k]) and not INLINE_ANSWER_MARKER.search(lines[k]):
-                a_text += " " + lines[k].strip()
-                k += 1
-            # look back for the last line that looks like a question
-            prev_q = None
-            for back in range(i-1, -1, -1):
-                if QUESTION_PREFIX.match(lines[back]) or INLINE_QUESTION_MARKER.search(lines[back]):
-                    prev_q = QUESTION_PREFIX.sub('', lines[back]).strip()
-                    break
-                if lines[back].strip():
-                    prev_q = lines[back].strip()
-                    break
-            if prev_q:
-                qa_pairs.append((prev_q, a_text.strip()))
-            i = k
+            
+            qa_pairs.append((q_text.strip(), a_text.strip()))
             continue
 
-        # CASE 4: fallback heuristics: if no explicit markers found, 
-        # look for lines where a line ends with '?' (likely a question) and next non-empty line is an answer-like sentence.
-        if line.endswith('?'):
-            q_text = line
-            j = i + 1
-            # gather next lines until next question or blank
-            a_text = ""
-            while j < n and not lines[j].endswith('?') and not QUESTION_PREFIX.match(lines[j]) and not ANSWER_PREFIX.match(lines[j]):
-                a_text += (" " + lines[j].strip())
-                j += 1
-            if a_text.strip():
-                qa_pairs.append((q_text.strip(), a_text.strip()))
-                i = j
-                continue
-
-        # Otherwise, advance
         i += 1
-
     return qa_pairs
 
-# Simple test when running this file directly
-if __name__ == "__main__":
-    test_file = "sample_exam.docx"
-    if os.path.exists(test_file):
-        lines = parse_exam_document(test_file)
-        pairs = extract_qa_pairs(lines)
-        print(f"Found {len(pairs)} Q&A pairs in {test_file}")
-        for idx, (q,a) in enumerate(pairs,1):
-            print(f"\nQ{idx}: {q}\nA{idx}: {a}\n")
+def parse_exam_document(file_path):
+    """
+    Auto-detect file type and return a list of Q&A pairs.
+    Uses Gemini for image and PDF handling, and the original functions for DOCX.
+    """
+    ext = os.path.splitext(file_path)[-1].lower()
+    if ext == ".docx":
+        # The correct logic is to return lines here, then extract pairs in the calling function
+        lines = parse_docx(file_path)
+        return lines
+    elif ext in [".pdf", ".jpg", ".jpeg", ".png", ".tiff"]:
+        return parse_pdf_or_image_with_gemini(file_path)
     else:
-        print("No local sample_exam.docx found. Use parse_exam_document(path) and extract_qa_pairs(lines).")
+        raise ValueError("❌ Unsupported file format. Use .docx, .pdf, .jpg, .jpeg, .png, or .tiff")
+
+if __name__ == "__main__":
+    test_file_image = "test2.jpg"
+    test_file_docx = "sample_exam.docx"
+    
+    if os.path.exists(test_file_image):
+        print(f"Processing {test_file_image} with Gemini API...")
+        qa_pairs = parse_exam_document(test_file_image)
+        if qa_pairs:
+            print(f"Found {len(qa_pairs)} Q&A pairs:")
+            for idx, (q, a) in enumerate(qa_pairs, 1):
+                print(f"\nQ{idx}: {q}\nA{idx}: {a}\n")
+        else:
+            print("No Q&A pairs were found.")
+    else:
+        print("No local sample image file found. Please create one to test.")
+
+    if os.path.exists(test_file_docx):
+        print(f"\nProcessing {test_file_docx} with text parser...")
+        lines = parse_exam_document(test_file_docx)
+        qa_pairs = extract_qa_pairs(lines)
+        if qa_pairs:
+            print(f"Found {len(qa_pairs)} Q&A pairs:")
+            for idx, (q, a) in enumerate(qa_pairs, 1):
+                print(f"\nQ{idx}: {q}\nA{idx}: {a}\n")
+        else:
+            print("No Q&A pairs were found.")
+    else:
+        print("No local sample docx file found. Please create one to test.")

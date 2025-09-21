@@ -9,10 +9,11 @@ if not token:
 
 # Endpoint + model
 endpoint = "https://models.github.ai/inference"
-model = "openai/gpt-4.1-nano"  # free-tier option
+model = "openai/gpt-4o-mini"  # free-tier option
 
 # Initialize client
 client = ChatCompletionsClient(endpoint=endpoint, credential=AzureKeyCredential(token))
+
 # Send a sample query
 response = client.complete(
     messages=[
@@ -21,5 +22,6 @@ response = client.complete(
     ],
     model=model
 )
+
 # Print model reply
 print("✅ Response:", response.choices[0].message["content"])
