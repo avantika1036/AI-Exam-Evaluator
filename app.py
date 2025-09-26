@@ -6,7 +6,7 @@ import zipfile
 import plotly.express as px
 import plotly.graph_objects as go
 from fpdf import FPDF
-from exam_evaluator import evaluate_exam_frontend 
+from exam_evaluator import evaluate_exam_frontend, generate_teacher_insights 
 from streamlit_lottie import st_lottie
 import requests
 import tempfile
@@ -98,18 +98,28 @@ with st.expander("Configure your grading rubric"):
     st.session_state["total_max_score_per_question"] = total_max_score_per_question
 
 # -------------------------
-# File upload (multiple)
+# File upload (mode selection)
 # -------------------------
-upload_mode = st.radio("Upload mode", ["Multiple files", "Single zip file"], horizontal=True)
+eval_mode = st.radio("Evaluation mode", ["Single Student", "Multiple Students", "ZIP Upload"], horizontal=True)
 
 uploaded_files = []
-if upload_mode == "Multiple files":
+if eval_mode == "Single Student":
+    single_file = st.file_uploader(
+        "Select student exam file (docx/pdf/jpg/png)",
+        type=["docx", "pdf", "jpg", "jpeg", "png"]
+    )
+    if single_file:
+        uploaded_files = [single_file]
+        st.info(f"Selected file: {single_file.name}")
+        
+elif eval_mode == "Multiple Students":
     uploaded_files = st.file_uploader(
-        "Select student exam files (docx/pdf/jpg/png)",
+        "Select multiple student exam files",
         accept_multiple_files=True,
         type=["docx", "pdf", "jpg", "jpeg", "png"]
     )
-else:
+    
+else:  # ZIP Upload mode
     zip_file = st.file_uploader("Upload a ZIP containing exam files", type=["zip"])
     if zip_file:
         tmpdir = tempfile.mkdtemp()
@@ -124,8 +134,14 @@ else:
                 if fname.lower().endswith(allowed_ext):
                     uploaded_files.append(open(os.path.join(root, fname), "rb"))
 
+# Add appropriate messaging
 if not uploaded_files:
-    st.info("Upload one or more exam files (or a ZIP) to evaluate the whole class.")
+    if eval_mode == "Single Student":
+        st.info("Upload a single exam file to evaluate one student.")
+    elif eval_mode == "Multiple Students":
+        st.info("Upload one or more exam files to evaluate multiple students.")
+    else:
+        st.info("Upload a ZIP file containing multiple student exams.")
     st.stop()
 
 # -------------------------
@@ -254,7 +270,12 @@ if not st.session_state["class_df"].empty:
 
         top3 = summary_df.head(3)
         for i, row in top3.iterrows():
-            st.metric(label=f"{i}. {row['student']}", value=f"{row['total_score']}/{row['max_total']}", delta=f"{row['percentage']}%")
+            total = int(round(row['total_score']))
+            max_score = int(round(row['max_total']))
+            percentage = int(round(row['percentage']))
+            st.metric(label=f"{i}. {row['student']}", 
+                      value=f"{total}/{max_score}", 
+                      delta=f"{percentage}%")
 
         min_score = st.slider("Filter students by minimum %", 0, 100, 0)
         filtered = summary_df[summary_df["percentage"] >= min_score]
@@ -266,8 +287,17 @@ if not st.session_state["class_df"].empty:
         st.header("📊 Class Analytics")
 
         q_avg = class_df.groupby("question_index")["score"].mean().reset_index().rename(columns={"score": "avg_score"})
-        fig_q = px.bar(q_avg, x="question_index", y="avg_score", title="Average score per question (class)",
-                       labels={"question_index": "Question #", "avg_score": "Average Score"})
+        fig_q = px.line(q_avg, x="question_index", y="avg_score", 
+                        markers=True,  # Add markers on the line
+                        title="Average score per question (class)",
+                        labels={"question_index": "Question #", "avg_score": "Average Score"})
+        # Customize line appearance
+        fig_q.update_traces(line_color='#00e0ff', marker=dict(size=8))
+        # Add class average line
+        avg_score = q_avg["avg_score"].mean()
+        fig_q.add_hline(y=avg_score, line_dash="dash", line_color="red",
+                        annotation_text="Class Average",
+                        annotation_position="bottom right")
         st.plotly_chart(fig_q, use_container_width=True)
 
         pivot = class_df.pivot_table(index="student", columns="question_index", values="score", fill_value=0)
@@ -320,6 +350,33 @@ if not st.session_state["class_df"].empty:
 
         st.info("🤖 Tip: Focus revision on lowest-performing questions and most-frequent concepts.")
 
+        st.subheader("📝 AI Teacher Notes")
+        if st.button("Generate AI Teaching Insights"):
+            with st.spinner("Generating teaching insights..."):
+                try:
+                    from exam_evaluator import init_client
+                    client, model = init_client()
+                    
+                    # Generate insights
+                    prompt = generate_teacher_insights(class_df, summary_df)
+                    response = client.complete(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are an experienced teaching assistant."},
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    
+                    insights = response.choices[0].message["content"]
+                    st.markdown(f"""
+                    ### Teaching Insights
+                    {insights}
+                    """)
+                    
+                except Exception as e:
+                    st.error(f"Could not generate AI insights: {str(e)}")
+                    st.info("Please check your GitHub token and try again.")
+    
     # Reports
     with tab4:
         st.header("📥 Reports & Downloads")
@@ -360,7 +417,9 @@ if not st.session_state["class_df"].empty:
 
             col_score, col_rank = st.columns(2)
             with col_score:
-                st.metric(label="Overall Score", value=f"{student_summary['total_score']}/{student_summary['max_total']}")
+                total_score = int(round(student_summary['total_score']))
+                max_total = int(round(student_summary['max_total']))
+                st.metric(label="Overall Score", value=f"{total_score}/{max_total}")
             with col_rank:
                 st.metric(label="Class Rank", value=student_summary.name)
 

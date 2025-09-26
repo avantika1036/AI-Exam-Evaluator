@@ -1,0 +1,9 @@
+{
+  "max_score": 5,
+  "criteria": {
+    "correctness": 0.6,
+    "completeness": 0.25,
+    "clarity": 0.15
+  },
+  "question_weights": {}
+}

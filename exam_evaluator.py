@@ -31,7 +31,7 @@ def init_client():
         raise ValueError("❌ GITHUB_TOKEN not found in environment variables.")
     
     endpoint = "https://models.github.ai/inference"
-    model = "openai/gpt-4.1-nano"  # free supported model
+    model = "openai/gpt-4o"  # free supported model
     client = ChatCompletionsClient(endpoint=endpoint, credential=AzureKeyCredential(token))
     return client, model
 
@@ -229,6 +229,8 @@ def main():
     max_score = len(results) * 5
     print(f"📊 Total Score: {total_score}/{max_score}")
 
+
+
 def evaluate_exam_frontend(exam_file, max_score=5, rubric=None):
     """
     Run evaluation and return results for frontend (Streamlit/Gradio).
@@ -277,6 +279,37 @@ def evaluate_exam_frontend(exam_file, max_score=5, rubric=None):
 
     return results, total_score, max_total
 
+    
+def generate_teacher_insights(class_df, summary_df):
+    """Generate AI teacher insights from class performance data"""
+    # Calculate key metrics
+    avg_score = summary_df['percentage'].mean()
+    q_performance = class_df.groupby('question_index').agg({
+        'score': 'mean',
+        'concepts': lambda x: ', '.join(set(x.str.split(', ').sum()))
+    })
+    
+    # Identify strengths and weaknesses
+    strong_qs = q_performance[q_performance['score'] > q_performance['score'].mean()]
+    weak_qs = q_performance[q_performance['score'] < q_performance['score'].mean()]
+    
+    # Build prompt for GPT
+    prompt = f"""
+    Analyze this class performance and provide specific teaching recommendations:
+    
+    Class average: {avg_score:.1f}%
+    Strong areas: Questions {', '.join(map(str, strong_qs.index.tolist()))}
+    Weak areas: Questions {', '.join(map(str, weak_qs.index.tolist()))}
+    Concepts covered: {', '.join(set(class_df['concepts'].str.split(', ').sum()))}
+    
+    Write a concise paragraph about:
+    1. Overall performance
+    2. Specific topics students understood well
+    3. Areas needing improvement
+    4. Recommended actions for the teacher
+    """
+    
+    return prompt
 
 if __name__ == "__main__":
     main()
