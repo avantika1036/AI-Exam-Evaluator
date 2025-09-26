@@ -180,7 +180,7 @@ Example response for a question with Correctness, Clarity, and Completeness as c
 # Step 6: Main Evaluation Loop
 # -------------------------------
 def main():
-    exam_file = "test1.jpg"  # change this to your exam file
+    exam_file = "tests/test2.jpg"
     ext = os.path.splitext(exam_file)[-1].lower()
     
     if ext == ".docx":
@@ -197,8 +197,13 @@ def main():
         return
     print(f"✅ Found {len(qa_pairs)} Q&A pairs.")
 
-    chunks = load_chunks("knowledge_chunks")
-    index, embeddings, sbert_model = build_faiss_index(chunks)
+    chunks = load_chunks("data/knowledge_chunks")
+    index, embeddings, sbert_model = build_faiss_index(
+        chunks,
+        emb_file="models/chunk_embeddings.npy",
+        index_file="models/faiss.index"
+    )
+
 
     client, model = init_client()
 
@@ -215,7 +220,9 @@ def main():
         })
 
     df = pd.DataFrame(results)
-    df.to_csv("evaluation_report.csv", index=False)
+    os.makedirs("data/outputs", exist_ok=True)
+    df.to_csv("data/outputs/evaluation_report.csv", index=False)
+
     print("✅ Evaluation complete. Results saved to evaluation_report.csv")
 
     total_score = sum(r["score"] for r in results)
@@ -240,7 +247,7 @@ def evaluate_exam_frontend(exam_file, max_score=5, rubric=None):
     if not qa_pairs:
         return [], 0, 0
 
-    chunks = load_chunks("knowledge_chunks")
+    chunks = load_chunks("data/knowledge_chunks")
     index, embeddings, sbert_model = build_faiss_index(chunks)
 
     client, model = init_client()

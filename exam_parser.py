@@ -67,7 +67,10 @@ def parse_pdf_or_image_with_gemini(file_path):
     If no question-answer pairs are found, return an empty JSON list.
     """
     
-    response = client.models.generate_content(model='gemini-1.5-flash', contents=[prompt, file_part])
+    response = client.models.generate_content(
+    model='models/gemini-2.0-flash-lite',  # choose latest version
+    contents=[prompt, file_part]
+)
     
     try:
         json_string = response.text.strip().removeprefix('```json\n').removesuffix('\n```')
@@ -148,8 +151,9 @@ def parse_exam_document(file_path):
         raise ValueError("❌ Unsupported file format. Use .docx, .pdf, .jpg, .jpeg, .png, or .tiff")
 
 if __name__ == "__main__":
-    test_file_image = "test2.jpg"
-    test_file_docx = "sample_exam.docx"
+    test_file_image = "tests/test2.jpg"
+    test_file_docx = "tests/sample_exam.docx"
+
     
     if os.path.exists(test_file_image):
         print(f"Processing {test_file_image} with Gemini API...")
