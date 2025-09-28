@@ -31,7 +31,7 @@ def init_client():
         raise ValueError("❌ GITHUB_TOKEN not found in environment variables.")
     
     endpoint = "https://models.github.ai/inference"
-    model = "openai/gpt-4o"  # free supported model
+    model = "openai/gpt-4o-mini"  # free supported model
     client = ChatCompletionsClient(endpoint=endpoint, credential=AzureKeyCredential(token))
     return client, model
 
