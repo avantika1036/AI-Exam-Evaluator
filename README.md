@@ -182,12 +182,15 @@ export GEMINI_API_KEY=your_gemini_api_key_here
 ---
 
 ### Run the Application
-
-streamlit run app.py  
+```
+streamlit run app.py
+```
 
 If Streamlit is not recognized:
 
-python -m streamlit run app.py  
+```
+python -m streamlit run app.py
+```
 
 ---
 
